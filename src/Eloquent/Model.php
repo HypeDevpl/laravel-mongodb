@@ -2,18 +2,23 @@
 
 namespace Jenssegers\Mongodb\Eloquent;
 
+use function array_key_exists;
 use DateTimeInterface;
+use function explode;
 use Illuminate\Contracts\Queue\QueueableCollection;
 use Illuminate\Contracts\Queue\QueueableEntity;
+use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Database\Eloquent\Model as BaseModel;
 use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Str;
+use function in_array;
 use Jenssegers\Mongodb\Query\Builder as QueryBuilder;
 use MongoDB\BSON\Binary;
 use MongoDB\BSON\ObjectID;
 use MongoDB\BSON\UTCDateTime;
+use function uniqid;
 
 abstract class Model extends BaseModel
 {
@@ -50,12 +55,12 @@ abstract class Model extends BaseModel
     /**
      * Custom accessor for the model's id.
      *
-     * @param mixed $value
+     * @param  mixed  $value
      * @return mixed
      */
     public function getIdAttribute($value = null)
     {
-        // If we don't have a value for 'id', we will use the Mongo '_id' value.
+        // If we don't have a value for 'id', we will use the MongoDB '_id' value.
         // This allows us to work with models in a more sql-like way.
         if (! $value && array_key_exists('_id', $this->attributes)) {
             $value = $this->attributes['_id'];
@@ -94,7 +99,7 @@ abstract class Model extends BaseModel
             $value = parent::asDateTime($value);
         }
 
-        return new UTCDateTime($value->format('Uv'));
+        return new UTCDateTime($value);
     }
 
     /**
@@ -182,7 +187,7 @@ abstract class Model extends BaseModel
     /**
      * @inheritdoc
      */
-    public function setAttribute($key, $value)
+    public function setAttribute($key, $value): static
     {
         // Convert _id to ObjectID.
         if ($key == '_id' && is_string($value)) {
@@ -191,13 +196,14 @@ abstract class Model extends BaseModel
             $value = $builder->convertKey($value);
         } // Support keys in dot notation.
         elseif (Str::contains($key, '.')) {
-            if (in_array($key, $this->getDates()) && $value) {
-                $value = $this->fromDateTime($value);
-            }
+            // Store to a temporary key, then move data to the actual key
+            $uniqueKey = uniqid($key);
+            parent::setAttribute($uniqueKey, $value);
 
-            Arr::set($this->attributes, $key, $value);
+            Arr::set($this->attributes, $key, $this->attributes[$uniqueKey] ?? null);
+            unset($this->attributes[$uniqueKey]);
 
-            return;
+            return $this;
         }
 
         return parent::setAttribute($key, $value);
@@ -219,13 +225,6 @@ abstract class Model extends BaseModel
                 $value = (string) $value;
             } elseif ($value instanceof Binary) {
                 $value = (string) $value->getData();
-            }
-        }
-
-        // Convert dot-notation dates.
-        foreach ($this->getDates() as $key) {
-            if (Str::contains($key, '.') && Arr::has($attributes, $key)) {
-                Arr::set($attributes, $key, (string) $this->asDateTime(Arr::get($attributes, $key)));
             }
         }
 
@@ -279,7 +278,7 @@ abstract class Model extends BaseModel
     /**
      * Remove one or more fields.
      *
-     * @param mixed $columns
+     * @param  mixed  $columns
      * @return int
      */
     public function drop($columns)
@@ -325,8 +324,8 @@ abstract class Model extends BaseModel
     /**
      * Remove one or more values from an array.
      *
-     * @param string $column
-     * @param mixed $values
+     * @param  string  $column
+     * @param  mixed  $values
      * @return mixed
      */
     public function pull($column, $values)
@@ -344,9 +343,9 @@ abstract class Model extends BaseModel
     /**
      * Append one or more values to the underlying attribute value and sync with original.
      *
-     * @param string $column
-     * @param array $values
-     * @param bool $unique
+     * @param  string  $column
+     * @param  array  $values
+     * @param  bool  $unique
      */
     protected function pushAttributeValues($column, array $values, $unique = false)
     {
@@ -369,8 +368,8 @@ abstract class Model extends BaseModel
     /**
      * Remove one or more values to the underlying attribute value and sync with original.
      *
-     * @param string $column
-     * @param array $values
+     * @param  string  $column
+     * @param  array  $values
      */
     protected function pullAttributeValues($column, array $values)
     {
@@ -402,7 +401,7 @@ abstract class Model extends BaseModel
     /**
      * Set the parent relation.
      *
-     * @param \Illuminate\Database\Eloquent\Relations\Relation $relation
+     * @param  \Illuminate\Database\Eloquent\Relations\Relation  $relation
      */
     public function setParentRelation(Relation $relation)
     {
@@ -495,7 +494,7 @@ abstract class Model extends BaseModel
      * Checks if column exists on a table.  As this is a document model, just return true.  This also
      * prevents calls to non-existent function Grammar::compileColumnListing().
      *
-     * @param string $key
+     * @param  string  $key
      * @return bool
      */
     protected function isGuardableColumn($key)
@@ -510,9 +509,63 @@ abstract class Model extends BaseModel
     {
         // Unset method
         if ($method == 'unset') {
-            return call_user_func_array([$this, 'drop'], $parameters);
+            return $this->drop(...$parameters);
         }
 
         return parent::__call($method, $parameters);
+    }
+
+    /**
+     * @inheritdoc
+     */
+    protected function addCastAttributesToArray(array $attributes, array $mutatedAttributes): array
+    {
+        foreach ($this->getCasts() as $key => $castType) {
+            if (! Arr::has($attributes, $key) || Arr::has($mutatedAttributes, $key)) {
+                continue;
+            }
+
+            $originalValue = Arr::get($attributes, $key);
+
+            // Here we will cast the attribute. Then, if the cast is a date or datetime cast
+            // then we will serialize the date for the array. This will convert the dates
+            // to strings based on the date format specified for these Eloquent models.
+            $castValue = $this->castAttribute(
+                $key, $originalValue
+            );
+
+            // If the attribute cast was a date or a datetime, we will serialize the date as
+            // a string. This allows the developers to customize how dates are serialized
+            // into an array without affecting how they are persisted into the storage.
+            if ($castValue !== null && in_array($castType, ['date', 'datetime', 'immutable_date', 'immutable_datetime'])) {
+                $castValue = $this->serializeDate($castValue);
+            }
+
+            if ($castValue !== null && ($this->isCustomDateTimeCast($castType) ||
+                    $this->isImmutableCustomDateTimeCast($castType))) {
+                $castValue = $castValue->format(explode(':', $castType, 2)[1]);
+            }
+
+            if ($castValue instanceof DateTimeInterface &&
+                $this->isClassCastable($key)) {
+                $castValue = $this->serializeDate($castValue);
+            }
+
+            if ($castValue !== null && $this->isClassSerializable($key)) {
+                $castValue = $this->serializeClassCastableAttribute($key, $castValue);
+            }
+
+            if ($this->isEnumCastable($key) && (! $castValue instanceof Arrayable)) {
+                $castValue = $castValue !== null ? $this->getStorableEnumValue($attributes[$key]) : null;
+            }
+
+            if ($castValue instanceof Arrayable) {
+                $castValue = $castValue->toArray();
+            }
+
+            Arr::set($attributes, $key, $castValue);
+        }
+
+        return $attributes;
     }
 }

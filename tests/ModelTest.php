@@ -577,8 +577,7 @@ class ModelTest extends TestCase
         $this->assertInstanceOf(Carbon::class, $user->getAttribute('entry.date'));
 
         $data = $user->toArray();
-        $this->assertNotInstanceOf(UTCDateTime::class, $data['entry']['date']);
-        $this->assertEquals((string) $user->getAttribute('entry.date')->format('Y-m-d H:i:s'), $data['entry']['date']);
+        $this->assertIsString($data['entry']['date']);
     }
 
     public function testCarbonDateMockingWorks()
@@ -767,5 +766,24 @@ class ModelTest extends TestCase
         $dataValues = ['array', 'of', 'values'];
         $model->fill(['level1' => $dataValues]);
         $this->assertEquals($dataValues, $model->getAttribute('level1'));
+    }
+
+    public function testFirstOrCreate(): void
+    {
+        $name = 'Jane Poe';
+
+        /** @var User $user */
+        $user = User::where('name', $name)->first();
+        $this->assertNull($user);
+
+        /** @var User $user */
+        $user = User::firstOrCreate(compact('name'));
+        $this->assertInstanceOf(Model::class, $user);
+        $this->assertTrue($user->exists);
+        $this->assertEquals($name, $user->name);
+
+        /** @var User $check */
+        $check = User::where('name', $name)->first();
+        $this->assertEquals($user->_id, $check->_id);
     }
 }

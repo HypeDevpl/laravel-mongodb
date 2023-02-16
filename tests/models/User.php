@@ -33,7 +33,10 @@ class User extends Eloquent implements AuthenticatableContract, CanResetPassword
     use Notifiable;
 
     protected $connection = 'mongodb';
-    protected $dates = ['birthday', 'entry.date'];
+    protected $casts = [
+        'birthday' => 'datetime',
+        'entry.date' => 'datetime',
+    ];
     protected static $unguarded = true;
 
     public function books()
@@ -73,7 +76,7 @@ class User extends Eloquent implements AuthenticatableContract, CanResetPassword
 
     public function photos()
     {
-        return $this->morphMany('Photo', 'imageable');
+        return $this->morphMany('Photo', 'has_image');
     }
 
     public function addresses()
